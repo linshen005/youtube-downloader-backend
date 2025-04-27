@@ -1,12 +1,16 @@
-from fastapi import FastAPI, Form, HTTPException, Query
+from fastapi import FastAPI, Form, HTTPException, Query, Path, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import logging
+import asyncio
 from typing import Optional
+import re
+from pathlib import Path as PathLib
 
 # 导入下载函数
 from download import download_audio, download_video
+from utils import sanitize_filename, is_safe_filename, clean_old_files, schedule_file_cleanup
 
 # 配置日志
 logging.basicConfig(
@@ -25,11 +29,43 @@ app = FastAPI(
 # 添加CORS支持，允许前端访问API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该限制为特定域名
+    allow_origins=["*"],  # 允许所有来源
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # 允许所有方法
+    allow_headers=["*"],  # 允许所有请求头
 )
+
+# Railway服务器基本URL
+BASE_URL = "https://youtube-downloader-backend-production.up.railway.app"
+
+# 下载目录路径
+DOWNLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+# 定时清理任务
+cleanup_task = None
+
+@app.on_event("startup")
+async def startup_event():
+    """应用启动时执行的事件"""
+    global cleanup_task
+    # 启动定时清理任务
+    cleanup_task = asyncio.create_task(
+        schedule_file_cleanup(DOWNLOAD_DIR, interval_minutes=10, max_age_minutes=30)
+    )
+    logger.info("已启动文件清理定时任务")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """应用关闭时执行的事件"""
+    global cleanup_task
+    if cleanup_task:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("已取消文件清理定时任务")
 
 @app.get("/")
 async def read_root():
@@ -37,7 +73,8 @@ async def read_root():
     return {
         "message": "Video Downloader API is running",
         "endpoints": {
-            "download": "/download/"
+            "download": "/download/",
+            "download_file": "/download/file/{filename}"
         }
     }
 
@@ -47,7 +84,7 @@ async def download_content(url: str = Form(...), format: str = Form(...), mode: 
     下载视频或音频
     
     Args:
-        url: YouTube视频链接
+        url: 视频链接
         format: 下载格式，'mp3'或'mp4'
         mode: 响应模式，'direct'直接返回文件，'json'返回JSON对象
     
@@ -79,14 +116,16 @@ async def download_content(url: str = Form(...), format: str = Form(...), mode: 
         
         # 根据模式返回不同响应
         if mode == "json":
-            # 构建文件URL（在实际部署时需要替换为真实的域名和路径）
-            file_url = f"/download/file/{filename}"
+            # 构建完整的文件URL，使用Railway服务器基本URL
+            file_url = f"{BASE_URL}/download/file/{filename}"
             return JSONResponse(
                 content={
                     "success": True,
                     "message": "下载成功",
-                    "file_url": file_url,
-                    "file_name": filename
+                    "file": {
+                        "url": file_url,
+                        "name": filename
+                    }
                 }
             )
         else:  # direct模式
@@ -106,22 +145,55 @@ async def download_content(url: str = Form(...), format: str = Form(...), mode: 
         )
 
 @app.get("/download/file/{filename}")
-async def get_file(filename: str):
-    """获取已下载的文件"""
-    download_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
-    file_path = os.path.join(download_dir, filename)
+async def get_file(filename: str = Path(..., title="文件名")):
+    """
+    获取已下载的文件
     
-    if not os.path.exists(file_path):
-        return JSONResponse(
-            status_code=404,
-            content={"error": "文件不存在"}
-        )
+    Args:
+        filename: 文件名
+        
+    Returns:
+        文件响应
+    """
+    # 安全检查：防止路径穿越攻击
+    if not is_safe_filename(filename):
+        raise HTTPException(status_code=400, detail="无效的文件名")
+    
+    # 使用Path对象确保路径安全
+    file_path_obj = PathLib(DOWNLOAD_DIR) / filename
+    
+    # 检查文件是否在downloads目录下
+    if not str(file_path_obj.resolve()).startswith(str(PathLib(DOWNLOAD_DIR).resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    file_path = str(file_path_obj)
+    
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="文件不存在")
     
     return FileResponse(
         path=file_path,
         filename=filename,
         media_type='application/octet-stream'
     )
+
+@app.get("/cleanup")
+async def trigger_cleanup(minutes: int = Query(30, title="Minutes", description="文件最大保留时间（分钟）")):
+    """
+    手动触发清理过期文件（仅用于测试和管理）
+    
+    Args:
+        minutes: 文件最大保留时间（分钟）
+        
+    Returns:
+        清理结果
+    """
+    deleted = clean_old_files(DOWNLOAD_DIR, max_age_minutes=minutes)
+    return {
+        "success": True,
+        "deleted_count": len(deleted),
+        "deleted_files": deleted
+    }
 
 if __name__ == "__main__":
     import uvicorn

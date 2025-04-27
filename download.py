@@ -6,6 +6,7 @@ import logging
 import uuid
 import subprocess
 from typing import Dict, Any, Optional, Callable
+from utils import sanitize_filename, detect_platform
 
 logger = logging.getLogger(__name__)
 
@@ -24,101 +25,147 @@ FFMPEG_AVAILABLE = check_ffmpeg()
 
 def download_audio(url: str) -> str:
     """
-    使用yt-dlp把给定的YouTube链接下载并提取成MP3格式
+    使用yt-dlp把给定的链接下载并提取成MP3格式
     
     Args:
-        url: YouTube视频链接
+        url: 视频链接
         
     Returns:
         保存的文件路径
     """
-    logger.info("开始下载音频")
+    logger.info(f"开始下载音频: {url}")
+    
+    # 检测平台
+    platform = detect_platform(url)
+    logger.info(f"检测到平台: {platform}")
     
     # 创建下载目录
     download_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
     os.makedirs(download_dir, exist_ok=True)
     
-    # 生成随机UUID作为文件名
-    file_uuid = str(uuid.uuid4())
-    output_template = os.path.join(download_dir, f"{file_uuid}.%(ext)s")
-    
-    # 构建下载命令
-    cmd = [
-        "yt-dlp",
-        "-x",
-        "--audio-format", "mp3",
-        "-o", output_template,
-        url
-    ]
-    
-    # 执行下载命令
-    subprocess.run(cmd, check=True)
-    
-    # 找到下载的文件
-    expected_path = os.path.join(download_dir, f"{file_uuid}.mp3")
-    
-    if os.path.exists(expected_path):
-        logger.info(f"文件保存成功：{expected_path}")
-        return expected_path
-    else:
-        # 可能文件名不是预期的，查找目录中以UUID开头的文件
-        for filename in os.listdir(download_dir):
-            if filename.startswith(file_uuid):
-                file_path = os.path.join(download_dir, filename)
-                logger.info(f"文件保存成功：{file_path}")
-                return file_path
+    try:
+        # 先获取视频信息
+        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', f"{platform} audio")
+            
+        # 清理标题作为文件名
+        safe_title = sanitize_filename(title)
+        logger.info(f"视频标题: {title}")
+        logger.info(f"安全文件名: {safe_title}")
         
-        # 如果没有找到文件，抛出异常
-        raise FileNotFoundError(f"下载完成但未找到文件：{expected_path}")
+        # 生成随机UUID作为文件名前缀
+        file_uuid = str(uuid.uuid4())[:8]
+        output_template = os.path.join(download_dir, f"{file_uuid}_{safe_title}.%(ext)s")
+        
+        # 构建下载命令
+        cmd = [
+            "yt-dlp",
+            "-x",
+            "--audio-format", "mp3",
+            "-o", output_template,
+            url
+        ]
+        
+        # 执行下载命令
+        logger.info(f"执行命令: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"下载命令失败: {result.stderr}")
+            raise Exception(f"下载失败: {result.stderr}")
+        
+        # 找到下载的文件
+        expected_path = os.path.join(download_dir, f"{file_uuid}_{safe_title}.mp3")
+        
+        if os.path.exists(expected_path):
+            logger.info(f"文件保存成功：{expected_path}")
+            return expected_path
+        else:
+            # 可能文件名不是预期的，查找目录中以UUID开头的文件
+            for filename in os.listdir(download_dir):
+                if filename.startswith(f"{file_uuid}_"):
+                    file_path = os.path.join(download_dir, filename)
+                    logger.info(f"文件保存成功：{file_path}")
+                    return file_path
+            
+            # 如果没有找到文件，抛出异常
+            raise FileNotFoundError(f"下载完成但未找到文件：{expected_path}")
+    except Exception as e:
+        logger.error(f"下载音频时出错: {str(e)}")
+        raise
 
 def download_video(url: str) -> str:
     """
-    使用yt-dlp把给定的YouTube链接下载成MP4格式
+    使用yt-dlp把给定的链接下载成MP4格式
     
     Args:
-        url: YouTube视频链接
+        url: 视频链接
         
     Returns:
         保存的文件路径
     """
-    logger.info("开始下载视频")
+    logger.info(f"开始下载视频: {url}")
+    
+    # 检测平台
+    platform = detect_platform(url)
+    logger.info(f"检测到平台: {platform}")
     
     # 创建下载目录
     download_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads")
     os.makedirs(download_dir, exist_ok=True)
     
-    # 生成随机UUID作为文件名
-    file_uuid = str(uuid.uuid4())
-    output_template = os.path.join(download_dir, f"{file_uuid}.%(ext)s")
-    
-    # 构建下载命令
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo+bestaudio",
-        "--merge-output-format", "mp4",
-        "-o", output_template,
-        url
-    ]
-    
-    # 执行下载命令
-    subprocess.run(cmd, check=True)
-    
-    # 找到下载的文件
-    expected_path = os.path.join(download_dir, f"{file_uuid}.mp4")
-    
-    if os.path.exists(expected_path):
-        logger.info(f"文件保存成功：{expected_path}")
-        return expected_path
-    else:
-        # 可能文件名不是预期的，查找目录中以UUID开头的文件
-        for filename in os.listdir(download_dir):
-            if filename.startswith(file_uuid):
-                file_path = os.path.join(download_dir, filename)
-                logger.info(f"文件保存成功：{file_path}")
-                return file_path
+    try:
+        # 先获取视频信息
+        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            title = info.get('title', f"{platform} video")
+            
+        # 清理标题作为文件名
+        safe_title = sanitize_filename(title)
+        logger.info(f"视频标题: {title}")
+        logger.info(f"安全文件名: {safe_title}")
         
-        # 如果没有找到文件，抛出异常
-        raise FileNotFoundError(f"下载完成但未找到文件：{expected_path}")
+        # 生成随机UUID作为文件名前缀
+        file_uuid = str(uuid.uuid4())[:8]
+        output_template = os.path.join(download_dir, f"{file_uuid}_{safe_title}.%(ext)s")
+        
+        # 构建下载命令
+        cmd = [
+            "yt-dlp",
+            "-f", "bestvideo+bestaudio/best",
+            "--merge-output-format", "mp4",
+            "-o", output_template,
+            url
+        ]
+        
+        # 执行下载命令
+        logger.info(f"执行命令: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"下载命令失败: {result.stderr}")
+            raise Exception(f"下载失败: {result.stderr}")
+        
+        # 找到下载的文件
+        expected_path = os.path.join(download_dir, f"{file_uuid}_{safe_title}.mp4")
+        
+        if os.path.exists(expected_path):
+            logger.info(f"文件保存成功：{expected_path}")
+            return expected_path
+        else:
+            # 可能文件名不是预期的，查找目录中以UUID开头的文件
+            for filename in os.listdir(download_dir):
+                if filename.startswith(f"{file_uuid}_"):
+                    file_path = os.path.join(download_dir, filename)
+                    logger.info(f"文件保存成功：{file_path}")
+                    return file_path
+            
+            # 如果没有找到文件，抛出异常
+            raise FileNotFoundError(f"下载完成但未找到文件：{expected_path}")
+    except Exception as e:
+        logger.error(f"下载视频时出错: {str(e)}")
+        raise
 
 class VideoDownloader:
     """视频下载器类，封装下载逻辑"""

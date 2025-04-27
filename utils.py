@@ -2,28 +2,30 @@ import os
 import time
 import logging
 import shutil
+import asyncio
+from datetime import datetime
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
-def clean_old_files(directory: str, max_age_hours: int = 24) -> List[str]:
+def clean_old_files(directory: str, max_age_minutes: int = 30) -> List[str]:
     """
     清理指定目录中的旧文件
     
     Args:
         directory: 目录路径
-        max_age_hours: 文件最大保留时间（小时）
+        max_age_minutes: 文件最大保留时间（分钟）
         
     Returns:
         被删除的文件列表
     """
     if not os.path.exists(directory) or not os.path.isdir(directory):
-        logger.warning(f"Directory does not exist: {directory}")
+        logger.warning(f"目录不存在: {directory}")
         return []
     
     deleted_files = []
     current_time = time.time()
-    max_age_seconds = max_age_hours * 3600
+    max_age_seconds = max_age_minutes * 60
     
     try:
         for filename in os.listdir(directory):
@@ -36,13 +38,42 @@ def clean_old_files(directory: str, max_age_hours: int = 24) -> List[str]:
                 try:
                     os.remove(file_path)
                     deleted_files.append(filename)
-                    logger.info(f"Deleted old file: {filename}")
+                    logger.info(f"删除过期文件: {filename} (已存在 {file_age/60:.1f} 分钟)")
                 except Exception as e:
-                    logger.error(f"Failed to delete file {filename}: {str(e)}")
+                    logger.error(f"删除文件 {filename} 失败: {str(e)}")
     except Exception as e:
-        logger.error(f"Error while cleaning old files: {str(e)}")
+        logger.error(f"清理旧文件时出错: {str(e)}")
     
     return deleted_files
+
+async def schedule_file_cleanup(directory: str, interval_minutes: int = 10, max_age_minutes: int = 30):
+    """
+    定时清理旧文件的异步任务
+    
+    Args:
+        directory: 要清理的目录路径
+        interval_minutes: 检查间隔时间（分钟）
+        max_age_minutes: 文件最大保留时间（分钟）
+    """
+    logger.info(f"启动定时清理任务: 每 {interval_minutes} 分钟检查一次，删除超过 {max_age_minutes} 分钟的文件")
+    
+    while True:
+        try:
+            # 等待指定时间
+            await asyncio.sleep(interval_minutes * 60)
+            
+            # 执行清理
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"[{now}] 开始执行定期清理...")
+            deleted = clean_old_files(directory, max_age_minutes)
+            
+            if deleted:
+                logger.info(f"已删除 {len(deleted)} 个过期文件: {', '.join(deleted)}")
+            else:
+                logger.info("没有找到需要删除的过期文件")
+                
+        except Exception as e:
+            logger.error(f"执行定时清理任务时出错: {str(e)}")
 
 def ensure_directory(directory: str) -> bool:
     """
@@ -58,7 +89,7 @@ def ensure_directory(directory: str) -> bool:
         os.makedirs(directory, exist_ok=True)
         return True
     except Exception as e:
-        logger.error(f"Failed to create directory {directory}: {str(e)}")
+        logger.error(f"创建目录 {directory} 失败: {str(e)}")
         return False
 
 def format_size(size_bytes: int) -> str:
@@ -132,4 +163,22 @@ def detect_platform(url: str) -> str:
     elif "instagram.com" in url:
         return "Instagram"
     
-    return "Unknown" 
+    return "Unknown"
+
+def is_safe_filename(filename: str) -> bool:
+    """
+    检查文件名是否安全（不含路径穿越尝试）
+    
+    Args:
+        filename: 文件名
+        
+    Returns:
+        是否为安全的文件名
+    """
+    import re
+    # 不允许".."、"/"和"\"等路径操作符
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return False
+    
+    # 只允许字母、数字、下划线、连字符和常见扩展名字符
+    return bool(re.match(r'^[a-zA-Z0-9_\-\.]+$', filename)) 
